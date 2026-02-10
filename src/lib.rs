@@ -4,6 +4,7 @@ pub mod crypto;
 pub mod derive;
 pub mod hash;
 pub mod manifest;
+pub mod offline;
 pub mod online;
 pub mod proto;
 pub mod roster;
