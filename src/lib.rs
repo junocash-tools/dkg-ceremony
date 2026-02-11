@@ -9,5 +9,6 @@ pub mod online;
 pub mod proto;
 pub mod roster;
 pub mod smoke;
+pub mod tls;
 pub mod transcript;
 pub mod zip316;

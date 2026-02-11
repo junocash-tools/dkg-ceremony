@@ -88,6 +88,8 @@ async fn e2e_impl() -> anyhow::Result<()> {
     // DKG setup.
     let n: u16 = 5;
     let t: u16 = 3;
+    let ceremony_id = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+    let ceremony_id_uuid = uuid::Uuid::parse_str(ceremony_id).context("parse ceremony_id")?;
 
     let mut admin_ports = vec![];
     for _ in 0..n {
@@ -128,6 +130,7 @@ async fn e2e_impl() -> anyhow::Result<()> {
 
         let admin_cfg = serde_json::json!({
             "config_version": 1,
+            "ceremony_id": ceremony_id,
             "operator_id": op_id,
             "identifier": identifier,
             "threshold": t,
@@ -175,6 +178,7 @@ async fn e2e_impl() -> anyhow::Result<()> {
     // Run dkg-ceremony coordinator (online).
     let ceremony_cfg = CeremonyConfigV1 {
         config_version: 1,
+        ceremony_id: ceremony_id.to_string(),
         threshold: t,
         max_signers: n,
         network: Network::Regtest,
@@ -369,6 +373,7 @@ async fn e2e_impl() -> anyhow::Result<()> {
         t,
         n,
         &roster_hash_hex,
+        &ceremony_id_uuid,
     )
     .context("ceremony_hash")?;
 

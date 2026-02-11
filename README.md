@@ -23,6 +23,7 @@ This repo is part of the `junocash-tools` org.
 
 The config includes:
 
+- `ceremony_id` (UUID, required) and included in the ceremony hash to avoid stale-state collisions
 - `threshold` and `max_signers` (enforced: `1 < threshold <= max_signers`)
 - `network` (`mainnet`, `testnet`, `regtest`) which selects ZIP-316 HRPs:
   - UA HRP: `j` / `jtest` / `jregtest`
@@ -79,6 +80,7 @@ Coordinator `CeremonyConfigV1` example:
 ```json
 {
   "config_version": 1,
+  "ceremony_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
   "threshold": 3,
   "max_signers": 5,
   "network": "regtest",
@@ -136,8 +138,59 @@ dkg-ceremony --config config.json online \
   --tls-ca-cert-pem-path ca.pem \
   --tls-client-cert-pem-path client.pem \
   --tls-client-key-pem-path client.key \
-  --tls-domain-name-override localhost
+  --tls-domain-name-override localhost \
+  --state-dir ./state/online \
+  --report-json ./out/online_report.json
 ```
+
+Reliable online controls:
+
+- `--state-dir <dir> --resume`: resumable execution checkpoints (`round1`, `part3`) so reruns continue from the last completed checkpoint.
+- timeout/retry knobs:
+  - `--connect-timeout-ms`
+  - `--rpc-timeout-ms`
+  - `--max-retries`
+  - `--backoff-start-ms`
+  - `--backoff-max-ms`
+  - `--jitter-ms`
+  - `--retryable-codes unavailable,deadline_exceeded`
+- `--report-json <path>`: machine-readable report with per-operator phase timings/retries/error codes.
+
+### Online Preflight
+
+Run preflight before round 1 to verify:
+
+- mTLS handshake to every operator
+- ceremony hash agreement
+- operator identifier mapping
+- operator phase/status readiness via `GetStatus`
+
+```bash
+dkg-ceremony --config config.json preflight \
+  --tls-ca-cert-pem-path ca.pem \
+  --tls-client-cert-pem-path client.pem \
+  --tls-client-key-pem-path client.key \
+  --report-json ./out/preflight_report.json
+```
+
+Preflight exits non-zero on mismatch (`ready=false` in report).
+
+### TLS Bootstrap (`tls init`)
+
+Generate a ceremony CA, coordinator client cert/key, and per-operator server cert/key files:
+
+```bash
+dkg-ceremony --config config.json tls init \
+  --out-dir ./tls \
+  --coordinator-common-name dkg-coordinator
+```
+
+Outputs include:
+
+- `ca.pem`, `ca.key`
+- `coordinator-client.pem`, `coordinator-client.key`
+- per-operator SAN-valid server certs under `tls/operators/`
+- `coordinator_client_cert_sha256.hex` (use this for `dkg-admin.grpc.coordinator_client_cert_sha256` pinning)
 
 mTLS requirements:
 
@@ -155,6 +208,28 @@ dkg-admin --config ./config.json serve
 ```
 
 On success, the coordinator distributes `out/KeysetManifest.json` and `transcript/` to all operators (and auditors).
+
+### Coordinator-Driven Post-DKG Export
+
+After DKG completion, coordinator can trigger encrypted key package export on every operator and validate returned receipts:
+
+```bash
+dkg-ceremony --config config.json export-key-packages \
+  --manifest-path ./out/KeysetManifest.json \
+  --tls-ca-cert-pem-path ca.pem \
+  --tls-client-cert-pem-path client.pem \
+  --tls-client-key-pem-path client.key \
+  --age-recipient age1... \
+  --remote-file-prefix /var/lib/dkg-admin/exports/keypackage \
+  --receipts-dir ./out/export-receipts \
+  --report-json ./out/export_report.json
+```
+
+S3 target is also supported:
+
+- `--s3-bucket`
+- `--s3-key-prefix`
+- `--s3-sse-kms-key-id`
 
 ### Offline (File Routing + Finalize)
 

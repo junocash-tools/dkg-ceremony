@@ -53,6 +53,7 @@ async fn online_ceremony_5_of_3_end_to_end() {
 
     let cfg = dkg_ceremony::config::CeremonyConfigV1 {
         config_version: 1,
+        ceremony_id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8".to_string(),
         threshold: t,
         max_signers: n,
         network: dkg_ceremony::config::Network::Regtest,
@@ -68,6 +69,7 @@ async fn online_ceremony_5_of_3_end_to_end() {
         validated.cfg.threshold,
         validated.cfg.max_signers,
         &validated.cfg.roster_hash_hex,
+        &validated.ceremony_id_uuid,
     )
     .unwrap();
 
@@ -151,6 +153,7 @@ async fn online_ceremony_rejects_corrupt_round1_hash() {
         let behavior = if identifier == 3 {
             SimBehavior {
                 corrupt_round1_hash: true,
+                ..Default::default()
             }
         } else {
             SimBehavior::default()
@@ -186,6 +189,7 @@ async fn online_ceremony_rejects_corrupt_round1_hash() {
 
     let cfg = dkg_ceremony::config::CeremonyConfigV1 {
         config_version: 1,
+        ceremony_id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8".to_string(),
         threshold: t,
         max_signers: n,
         network: dkg_ceremony::config::Network::Regtest,
@@ -201,6 +205,7 @@ async fn online_ceremony_rejects_corrupt_round1_hash() {
         validated.cfg.threshold,
         validated.cfg.max_signers,
         &validated.cfg.roster_hash_hex,
+        &validated.ceremony_id_uuid,
     )
     .unwrap();
 
@@ -234,15 +239,231 @@ async fn online_ceremony_rejects_corrupt_round1_hash() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn online_ceremony_resume_after_partial_part3_checkpoint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut behaviors = BTreeMap::<u16, SimBehavior>::new();
+    behaviors.insert(
+        5,
+        SimBehavior {
+            fail_part3_once: true,
+            ..Default::default()
+        },
+    );
+
+    let (mut admins, validated, tls) = setup_cluster(&tmp, behaviors).await;
+
+    let first = dkg_ceremony::online::run_with_options(
+        validated.clone(),
+        tls.clone(),
+        dkg_ceremony::online::OnlineRunOptions {
+            state_dir: tmp.path().join("online-state"),
+            resume: false,
+            retry: dkg_ceremony::online::RetryPolicy {
+                max_retries: 0,
+                ..Default::default()
+            },
+            report_json_path: Some(tmp.path().join("report-first.json")),
+        },
+    )
+    .await;
+    assert!(first.is_err(), "expected first run to fail");
+
+    let second = dkg_ceremony::online::run_with_options(
+        validated,
+        tls,
+        dkg_ceremony::online::OnlineRunOptions {
+            state_dir: tmp.path().join("online-state"),
+            resume: true,
+            retry: dkg_ceremony::online::RetryPolicy::default(),
+            report_json_path: Some(tmp.path().join("report-second.json")),
+        },
+    )
+    .await
+    .unwrap();
+
+    let manifest_bytes = std::fs::read(&second.manifest_path).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert_eq!(manifest["manifest_version"], 1);
+
+    for a in &admins {
+        let st = a.state.lock().await;
+        if st.identifier == 5 {
+            assert_eq!(st.part3_calls, 2, "identifier=5 should be retried");
+        } else {
+            assert_eq!(st.part3_calls, 1, "identifier={} should not rerun part3", st.identifier);
+        }
+    }
+
+    for a in admins.drain(..) {
+        a.handle.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn online_ceremony_retries_transient_unavailable_part2() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut behaviors = BTreeMap::<u16, SimBehavior>::new();
+    behaviors.insert(
+        3,
+        SimBehavior {
+            fail_part2_unavailable_once: true,
+            ..Default::default()
+        },
+    );
+
+    let (admins, validated, tls) = setup_cluster(&tmp, behaviors).await;
+    let report_path = tmp.path().join("report.json");
+    let out = dkg_ceremony::online::run_with_options(
+        validated,
+        tls,
+        dkg_ceremony::online::OnlineRunOptions {
+            state_dir: tmp.path().join("online-state"),
+            resume: false,
+            retry: dkg_ceremony::online::RetryPolicy {
+                max_retries: 3,
+                ..Default::default()
+            },
+            report_json_path: Some(report_path.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(out.manifest_path.exists());
+
+    let report_raw = std::fs::read(&report_path).unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&report_raw).unwrap();
+    let ops = report["operator_reports"].as_array().unwrap();
+    let op3 = ops
+        .iter()
+        .find(|v| v["identifier"].as_u64() == Some(3))
+        .unwrap();
+    let retries = op3["phase_retries"]["part2"].as_u64().unwrap();
+    assert!(retries >= 1, "expected at least one part2 retry for operator 3");
+
+    for a in admins {
+        a.handle.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn online_preflight_reports_mismatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (admins, validated, tls) = setup_cluster(&tmp, BTreeMap::new()).await;
+
+    // Intentionally break one expected ceremony hash to trigger a mismatch report.
+    *admins[0].expected_ceremony_hash.lock().await = Some("ff".repeat(32));
+
+    let report = dkg_ceremony::online::preflight(&validated, &tls, &dkg_ceremony::online::RetryPolicy::default())
+        .await
+        .unwrap();
+    assert!(!report.ready);
+    assert!(report.operators.iter().any(|op| !op.ready));
+
+    for a in admins {
+        a.handle.abort();
+    }
+}
+
+async fn setup_cluster(
+    tmp: &tempfile::TempDir,
+    behaviors: BTreeMap<u16, SimBehavior>,
+) -> (
+    Vec<SpawnedAdmin>,
+    dkg_ceremony::config::ValidatedCeremonyConfig,
+    dkg_ceremony::online::OnlineTlsConfig,
+) {
+    let (ca_pem, client_cert_pem, client_key_pem, server_identity_pem) = gen_test_mtls_material();
+    let n: u16 = 5;
+    let t: u16 = 3;
+
+    let mut admins = vec![];
+    for identifier in 1..=n {
+        let behavior = behaviors.get(&identifier).cloned().unwrap_or_default();
+        let admin = spawn_sim_admin_with_behavior(
+            identifier,
+            n,
+            t,
+            behavior,
+            ca_pem.clone(),
+            server_identity_pem.cert_pem.clone(),
+            server_identity_pem.key_pem.clone(),
+        )
+        .await;
+        admins.push(admin);
+    }
+
+    admins.sort_by_key(|a| a.identifier);
+    let ops = admins
+        .iter()
+        .map(|a| dkg_ceremony::roster::RosterOperatorV1 {
+            operator_id: format!("op{:02}", a.identifier),
+            grpc_endpoint: Some(a.endpoint.clone()),
+            age_recipient: None,
+        })
+        .collect::<Vec<_>>();
+    let roster = dkg_ceremony::roster::RosterV1 {
+        roster_version: 1,
+        operators: ops,
+        coordinator_age_recipient: None,
+    };
+    let roster_hash_hex = roster.roster_hash_hex().unwrap();
+
+    let cfg = dkg_ceremony::config::CeremonyConfigV1 {
+        config_version: 1,
+        ceremony_id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8".to_string(),
+        threshold: t,
+        max_signers: n,
+        network: dkg_ceremony::config::Network::Regtest,
+        roster,
+        roster_hash_hex,
+        out_dir: tmp.path().join("out"),
+        transcript_dir: tmp.path().join("transcript"),
+    };
+    let validated = cfg.validate().unwrap();
+
+    let ceremony_hash = dkg_ceremony::ceremony_hash::ceremony_hash_hex_v1(
+        validated.cfg.network,
+        validated.cfg.threshold,
+        validated.cfg.max_signers,
+        &validated.cfg.roster_hash_hex,
+        &validated.ceremony_id_uuid,
+    )
+    .unwrap();
+    for a in &admins {
+        *a.expected_ceremony_hash.lock().await = Some(ceremony_hash.clone());
+    }
+
+    let ca_path = tmp.path().join("ca.pem");
+    let client_cert_path = tmp.path().join("client.pem");
+    let client_key_path = tmp.path().join("client.key");
+    std::fs::write(&ca_path, &ca_pem).unwrap();
+    std::fs::write(&client_cert_path, &client_cert_pem).unwrap();
+    std::fs::write(&client_key_path, &client_key_pem).unwrap();
+
+    let tls = dkg_ceremony::online::OnlineTlsConfig {
+        tls_ca_cert_pem_path: ca_path,
+        tls_client_cert_pem_path: client_cert_path,
+        tls_client_key_pem_path: client_key_path,
+        tls_domain_name_override: Some("localhost".to_string()),
+        ..Default::default()
+    };
+
+    (admins, validated, tls)
+}
+
 #[derive(Clone, Debug, Default)]
 struct SimBehavior {
     corrupt_round1_hash: bool,
+    fail_part2_unavailable_once: bool,
+    fail_part3_once: bool,
 }
 
 struct SpawnedAdmin {
     identifier: u16,
     endpoint: String,
     expected_ceremony_hash: Arc<Mutex<Option<String>>>,
+    state: Arc<Mutex<SimState>>,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -257,11 +478,15 @@ struct SimState {
     identifier: u16,
     max_signers: u16,
     threshold: u16,
+    part2_failures_remaining: u32,
+    part3_failures_remaining: u32,
+    part3_calls: u32,
 
     round1_secret: Option<redpallas::keys::dkg::round1::SecretPackage>,
     round1_package: Option<Vec<u8>>,
 
     round2_secret: Option<redpallas::keys::dkg::round2::SecretPackage>,
+    round2_out: Option<Vec<pb::Round2PackageOut>>,
 
     key_package: Option<redpallas::keys::KeyPackage>,
     public_key_package: Option<redpallas::keys::PublicKeyPackage>,
@@ -279,18 +504,22 @@ impl SimAdmin {
     fn new(identifier: u16, max_signers: u16, threshold: u16, behavior: SimBehavior) -> Self {
         Self {
             expected_ceremony_hash: Arc::new(Mutex::new(None)),
-            behavior,
             state: Arc::new(Mutex::new(SimState {
                 identifier,
                 max_signers,
                 threshold,
+                part2_failures_remaining: if behavior.fail_part2_unavailable_once { 1 } else { 0 },
+                part3_failures_remaining: if behavior.fail_part3_once { 1 } else { 0 },
+                part3_calls: 0,
                 round1_secret: None,
                 round1_package: None,
                 round2_secret: None,
+                round2_out: None,
                 key_package: None,
                 public_key_package: None,
                 smoke_session: None,
             })),
+            behavior,
         }
     }
 
@@ -307,6 +536,41 @@ impl SimAdmin {
 
 #[tonic::async_trait]
 impl pb::dkg_admin_server::DkgAdmin for SimAdmin {
+    async fn get_status(
+        &self,
+        request: tonic::Request<pb::GetStatusRequest>,
+    ) -> Result<tonic::Response<pb::GetStatusResponse>, tonic::Status> {
+        self.validate(&request.get_ref().ceremony_hash).await?;
+
+        let st = self.state.lock().await;
+        let phase = if st.key_package.is_some() && st.public_key_package.is_some() {
+            pb::CeremonyPhase::Part3 as i32
+        } else if st.round2_secret.is_some() {
+            pb::CeremonyPhase::Round2 as i32
+        } else if st.round1_package.is_some() {
+            pb::CeremonyPhase::Round1 as i32
+        } else {
+            pb::CeremonyPhase::Empty as i32
+        };
+        let round1_hash = st
+            .round1_package
+            .as_ref()
+            .map(|b| dkg_ceremony::hash::sha256(b).to_vec())
+            .unwrap_or_default();
+
+        Ok(tonic::Response::new(pb::GetStatusResponse {
+            operator_id: format!("op{:02}", st.identifier),
+            identifier: st.identifier as u32,
+            ceremony_hash: request.get_ref().ceremony_hash.clone(),
+            phase,
+            round1_package_hash: round1_hash,
+            part2_input_hash: vec![],
+            part3_input_hash: vec![],
+            binary_version: "sim".to_string(),
+            binary_commit: "sim".to_string(),
+        }))
+    }
+
     async fn get_round1_package(
         &self,
         request: tonic::Request<pb::GetRound1PackageRequest>,
@@ -343,6 +607,15 @@ impl pb::dkg_admin_server::DkgAdmin for SimAdmin {
     ) -> Result<tonic::Response<pb::Part2Response>, tonic::Status> {
         self.validate(&request.get_ref().ceremony_hash).await?;
         let mut st = self.state.lock().await;
+        if st.part2_failures_remaining > 0 {
+            st.part2_failures_remaining -= 1;
+            return Err(tonic::Status::unavailable("transient_part2_unavailable"));
+        }
+        if let Some(cached) = &st.round2_out {
+            return Ok(tonic::Response::new(pb::Part2Response {
+                round2_packages: cached.clone(),
+            }));
+        }
         let secret = st
             .round1_secret
             .take()
@@ -391,6 +664,7 @@ impl pb::dkg_admin_server::DkgAdmin for SimAdmin {
                 package_hash: dkg_ceremony::hash::sha256(&bytes).to_vec(),
             });
         }
+        st.round2_out = Some(out.clone());
 
         Ok(tonic::Response::new(pb::Part2Response { round2_packages: out }))
     }
@@ -401,6 +675,11 @@ impl pb::dkg_admin_server::DkgAdmin for SimAdmin {
     ) -> Result<tonic::Response<pb::Part3Response>, tonic::Status> {
         self.validate(&request.get_ref().ceremony_hash).await?;
         let mut st = self.state.lock().await;
+        st.part3_calls += 1;
+        if st.part3_failures_remaining > 0 {
+            st.part3_failures_remaining -= 1;
+            return Err(tonic::Status::aborted("transient_part3_failure"));
+        }
         let r2_secret = st
             .round2_secret
             .as_ref()
@@ -598,6 +877,7 @@ async fn spawn_sim_admin_with_behavior(
 
     let admin = SimAdmin::new(identifier, max_signers, threshold, behavior);
     let expected_ceremony_hash = admin.expected_ceremony_hash.clone();
+    let state = admin.state.clone();
     let svc = pb::dkg_admin_server::DkgAdminServer::new(admin);
 
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
@@ -613,6 +893,7 @@ async fn spawn_sim_admin_with_behavior(
         identifier,
         endpoint,
         expected_ceremony_hash,
+        state,
         handle,
     }
 }

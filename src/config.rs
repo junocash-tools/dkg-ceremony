@@ -26,6 +26,7 @@ impl Network {
 #[serde(deny_unknown_fields)]
 pub struct CeremonyConfigV1 {
     pub config_version: u32,
+    pub ceremony_id: String,
 
     pub threshold: u16,
     pub max_signers: u16,
@@ -53,6 +54,7 @@ fn default_transcript_dir() -> PathBuf {
 pub struct ValidatedCeremonyConfig {
     pub cfg: CeremonyConfigV1,
     pub canonical_operators: Vec<AssignedOperator>,
+    pub ceremony_id_uuid: uuid::Uuid,
 }
 
 impl CeremonyConfigV1 {
@@ -71,6 +73,13 @@ impl CeremonyConfigV1 {
         if self.config_version != 1 {
             return Err(ConfigError::ConfigVersionUnsupported(self.config_version));
         }
+
+        let ceremony_id = self.ceremony_id.trim();
+        if ceremony_id.is_empty() {
+            return Err(ConfigError::CeremonyIdEmpty);
+        }
+        let ceremony_id_uuid =
+            uuid::Uuid::parse_str(ceremony_id).map_err(|_| ConfigError::CeremonyIdInvalid)?;
 
         if !(1 < self.threshold && self.threshold <= self.max_signers) {
             return Err(ConfigError::ThresholdInvalid {
@@ -103,10 +112,12 @@ impl CeremonyConfigV1 {
 
         Ok(ValidatedCeremonyConfig {
             cfg: CeremonyConfigV1 {
+                ceremony_id: ceremony_id.to_string(),
                 roster_hash_hex: self.roster_hash_hex.trim().to_string(),
                 ..self
             },
             canonical_operators,
+            ceremony_id_uuid,
         })
     }
 }
@@ -127,6 +138,10 @@ pub enum ConfigError {
     },
     #[error("config_version_unsupported: {0}")]
     ConfigVersionUnsupported(u32),
+    #[error("ceremony_id_empty")]
+    CeremonyIdEmpty,
+    #[error("ceremony_id_invalid")]
+    CeremonyIdInvalid,
     #[error("threshold_invalid: threshold={threshold} max_signers={max_signers}")]
     ThresholdInvalid { threshold: u16, max_signers: u16 },
     #[error("max_signers_mismatch: expected={expected} got={got}")]
@@ -136,4 +151,3 @@ pub enum ConfigError {
     #[error("{0}")]
     Roster(#[from] RosterError),
 }
-

@@ -19,6 +19,7 @@ prost = "0.14.3"
 rand = "0.8.5"
 rand_chacha = "0.3.1"
 rand_core = "0.6.4"
+rcgen = "0.13.2"
 reddsa = { git = "https://github.com/ZcashFoundation/reddsa.git", rev = "155c1803cf4187ee4635377a9cf589a71ae5ebfa", features = ["frost"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -30,6 +31,7 @@ tonic = { version = "0.14.3", default-features = false, features = ["codegen", "
 tonic-prost = "0.14.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+uuid = { version = "1.18.1", features = ["std"] }
 zcash_address = "0.10.1"
 zcash_encoding = "0.3.0"
 zcash_protocol = "0.7.2"
@@ -40,6 +42,5 @@ protoc-bin-vendored = "3.2.0"
 tonic-prost-build = "0.14.3"
 
 [dev-dependencies]
-rcgen = "0.13.2"
 tempfile = "3.22.0"
 tokio-stream = { version = "0.1.17", features = ["net"] }

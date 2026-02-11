@@ -88,6 +88,7 @@ pub fn finalize(
         validated_cfg.cfg.threshold,
         validated_cfg.cfg.max_signers,
         &validated_cfg.cfg.roster_hash_hex,
+        &validated_cfg.ceremony_id_uuid,
     )
     .context("ceremony_hash")?;
 
@@ -288,4 +289,3 @@ fn public_key_package_from_round1(
     redpallas::keys::PublicKeyPackage::from_dkg_commitments(&commitments_ref)
         .map_err(|e| anyhow!("public_key_package_from_commitments_failed: {e}"))
 }
-
