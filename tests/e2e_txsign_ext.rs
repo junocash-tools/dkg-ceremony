@@ -14,7 +14,7 @@ use dkg_ceremony::config::{CeremonyConfigV1, Network};
 use dkg_ceremony::proto::v1 as pb;
 use dkg_ceremony::roster::{RosterOperatorV1, RosterV1};
 
-const JUNOCASH_VERSION: &str = "0.9.8";
+const JUNOCASH_VERSION: &str = "0.9.9";
 const JUNOCASH_RPC_USER: &str = "rpcuser";
 const JUNOCASH_RPC_PASS: &str = "rpcpass";
 
@@ -527,16 +527,10 @@ async fn e2e_impl() -> anyhow::Result<()> {
     if !strings_eq_nocase(accepted.trim(), txid.trim()) {
         return Err(anyhow!("txid_mismatch: accepted={} want={}", accepted.trim(), txid));
     }
-    docker_cli(&container_name, &["generate", "1"]).context("mine 1")?;
+    let hash = mine_until_confirmed(&container_name, &txid, Duration::from_secs(30))
+        .context("mine until confirmed")?;
 
     // Verify tx is in the latest block.
-    let height: u64 = docker_cli(&container_name, &["getblockcount"])?
-        .trim()
-        .parse()
-        .context("parse height")?;
-    let hash = docker_cli(&container_name, &["getblockhash", &height.to_string()])?
-        .trim()
-        .to_string();
     let blk_raw = docker_cli(&container_name, &["getblock", &hash, "1"])?;
     let blk_json: serde_json::Value =
         serde_json::from_slice(blk_raw.as_bytes()).context("parse getblock")?;
@@ -686,6 +680,10 @@ impl DockerContainerGuard {
             .arg("-listen=0")
             .arg("-txindex=1")
             .arg("-printtoconsole=1")
+            .arg("-txunpaidactionlimit=10000")
+            .arg("-blockunpaidactionlimit=0")
+            .arg("-txexpirydelta=4")
+            .arg("-blockmintxfee=0")
             .arg("-datadir=/data")
             .arg("-rpcbind=0.0.0.0")
             .arg("-rpcallowip=0.0.0.0/0")
@@ -758,6 +756,31 @@ fn wait_for_junocashd_rpc(container: &str, timeout: Duration) -> anyhow::Result<
         if start.elapsed() > timeout {
             return Err(anyhow!("junocashd_rpc_timeout"));
         }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn mine_until_confirmed(container: &str, txid: &str, timeout: Duration) -> anyhow::Result<String> {
+    let start = Instant::now();
+    let _ = docker_cli(container, &["prioritisetransaction", txid, "0", "100000000"]);
+    loop {
+        if let Ok(raw) = docker_cli(container, &["getrawtransaction", txid, "1"]) {
+            let tx: serde_json::Value =
+                serde_json::from_slice(raw.as_bytes()).context("parse getrawtransaction")?;
+            let confirmations = tx["confirmations"].as_i64().unwrap_or(0);
+            if confirmations > 0 {
+                if let Some(block_hash) = tx["blockhash"].as_str() {
+                    let block_hash = block_hash.trim();
+                    if !block_hash.is_empty() {
+                        return Ok(block_hash.to_string());
+                    }
+                }
+            }
+        }
+        if start.elapsed() > timeout {
+            return Err(anyhow!("tx_not_mined"));
+        }
+        docker_cli(container, &["generate", "1"]).context("mine 1")?;
         std::thread::sleep(Duration::from_millis(200));
     }
 }
