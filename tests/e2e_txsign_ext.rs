@@ -14,7 +14,7 @@ use dkg_ceremony::config::{CeremonyConfigV1, Network};
 use dkg_ceremony::proto::v1 as pb;
 use dkg_ceremony::roster::{RosterOperatorV1, RosterV1};
 
-const JUNOCASH_VERSION: &str = "0.9.9";
+const JUNOCASH_VERSION: &str = "0.9.12";
 const JUNOCASH_RPC_USER: &str = "rpcuser";
 const JUNOCASH_RPC_PASS: &str = "rpcpass";
 
